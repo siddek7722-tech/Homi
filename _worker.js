@@ -69,11 +69,27 @@ INSERT OR IGNORE INTO products (id,name,category,unit,emoji,color,description,pr
 INSERT OR IGNORE INTO products (id,name,category,unit,emoji,color,description,price,stock_status,featured,display_order) VALUES ('raw-papaya','কাঁচা পেঁপে','সবজি','কেজি','🥭','#ECF2D6','তরকারি ও রান্নায়',NULL,'available',0,23);
 `;
 
+// D1's exec() can treat line breaks in multi-line schema as separate queries.
+// Prepare each complete SQL statement and run them as one atomic D1 batch instead.
+const HOMI_SCHEMA_STATEMENTS = HOMI_DATABASE_SCHEMA
+  .split(/\r?\n/)
+  .filter(line => !line.trimStart().startsWith('--'))
+  .join('\n')
+  .split(';')
+  .map(sql => sql.trim())
+  .filter(Boolean);
+
 async function ensureDatabase(db) {
   const result = await db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('products','orders','admin_attempts')").all();
   const names = new Set((result.results || []).map(row => row.name));
-  if (['products','orders','admin_attempts'].some(name => !names.has(name))) {
-    await db.exec(HOMI_DATABASE_SCHEMA);
+  const missingTables = ['products','orders','admin_attempts'].some(name => !names.has(name));
+  // Also repair databases left with zero/partial starter products after a failed import.
+  const productCount = names.has('products')
+    ? Number((await db.prepare('SELECT COUNT(*) AS total FROM products').first())?.total || 0)
+    : 0;
+  if (missingTables || productCount < 23) {
+    // Statements are CREATE ... IF NOT EXISTS and INSERT OR IGNORE, safe to run again.
+    await db.batch(HOMI_SCHEMA_STATEMENTS.map(sql => db.prepare(sql)));
   }
 }
 
@@ -290,7 +306,7 @@ async function onRequest(context) {
     }
     return fail('অনুরোধটি পাওয়া যায়নি।',404);
   }catch(error){
-    console.error('Homi API error:',String(error?.message||error));
+    console.error('Homi API error:', String(error?.message || error), String(error?.cause?.message || ''));
     if(error?.message?.includes('অনুরোধ অনেক বড়')||error?.message?.includes('সঠিক তথ্য'))return fail(error.message,400);
     return fail('সার্ভারে সাময়িক সমস্যা হয়েছে। পরে আবার চেষ্টা করুন।',500);
   }
